@@ -35,14 +35,15 @@ import org.apache.kafka.common.errors.NotEnoughReplicasException;
 import org.apache.kafka.common.errors.PolicyViolationException;
 import org.apache.kafka.common.errors.SaslAuthenticationException;
 import org.apache.kafka.common.errors.SecurityDisabledException;
+import org.apache.kafka.common.errors.TimeoutException;
 import org.apache.kafka.common.errors.TopicAuthorizationException;
 import org.apache.kafka.common.errors.TopicExistsException;
 import org.apache.kafka.common.errors.TransactionalIdAuthorizationException;
 import org.apache.kafka.common.errors.UnknownServerException;
 import org.apache.kafka.common.errors.UnknownTopicOrPartitionException;
 import org.apache.kafka.common.errors.UnsupportedVersionException;
-import org.junit.Before;
-import org.junit.Test;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 import javax.ws.rs.core.Response;
 import javax.ws.rs.core.Response.Status;
@@ -55,14 +56,15 @@ import static io.confluent.rest.exceptions.KafkaExceptionMapper.KAFKA_BAD_REQUES
 import static io.confluent.rest.exceptions.KafkaExceptionMapper.KAFKA_ERROR_ERROR_CODE;
 import static io.confluent.rest.exceptions.KafkaExceptionMapper.KAFKA_RETRIABLE_ERROR_ERROR_CODE;
 import static io.confluent.rest.exceptions.KafkaExceptionMapper.KAFKA_UNKNOWN_TOPIC_PARTITION_CODE;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNotNull;
+import static io.confluent.rest.exceptions.KafkaExceptionMapper.TOPIC_NOT_FOUND_ERROR_CODE;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 public class KafkaExceptionMapperTest {
 
   private KafkaExceptionMapper exceptionMapper;
 
-  @Before
+  @BeforeEach
   public void setUp() {
     exceptionMapper = new KafkaExceptionMapper(null);
   }
@@ -123,6 +125,10 @@ public class KafkaExceptionMapperTest {
         KAFKA_RETRIABLE_ERROR_ERROR_CODE);
     verifyMapperResponse(new NotEnoughReplicasException("some message"), Status.INTERNAL_SERVER_ERROR,
         KAFKA_RETRIABLE_ERROR_ERROR_CODE);
+    //Including the special case of a topic not being present (eg because it's not been defined yet)
+    //not returning a 500 error
+    verifyMapperResponse(new TimeoutException("Topic topic1 not present in metadata "
+        + "after 60000 ms."), Status.NOT_FOUND, TOPIC_NOT_FOUND_ERROR_CODE);
 
     //test couple of kafka exception
     verifyMapperResponse(new CommitFailedException(), Status.INTERNAL_SERVER_ERROR,

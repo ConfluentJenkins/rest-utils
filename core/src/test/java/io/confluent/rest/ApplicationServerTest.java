@@ -15,9 +15,9 @@ import org.eclipse.jetty.util.resource.Resource;
 import org.eclipse.jetty.util.resource.ResourceCollection;
 import org.eclipse.jetty.server.ServerConnector;
 import org.glassfish.jersey.servlet.ServletProperties;
-import org.junit.After;
-import org.junit.Before;
-import org.junit.Test;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
 import java.util.Collections;
@@ -39,16 +39,16 @@ import javax.ws.rs.ext.ExceptionMapper;
 
 import static org.hamcrest.CoreMatchers.is;
 import static org.hamcrest.MatcherAssert.assertThat;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.assertNull;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertNull;
 
 public class ApplicationServerTest {
 
   static TestRestConfig testConfig;
   private static ApplicationServer<TestRestConfig> server;
 
-  @Before
+  @BeforeEach
   public void setup() throws Exception {
     Properties props = new Properties();
     props.setProperty(RestConfig.LISTENERS_CONFIG, "http://0.0.0.0:0");
@@ -57,7 +57,7 @@ public class ApplicationServerTest {
     server = new ApplicationServer<>(testConfig);
   }
 
-  @After
+  @AfterEach
   public void tearDown() throws Exception {
     server.stop();
   }
@@ -169,10 +169,7 @@ public class ApplicationServerTest {
     RestConfig config = new RestConfig(RestConfig.baseConfigDef(), props);
 
     // Should not throw, since http is not considered a listener name.
-    List<ApplicationServer.NamedURI> listeners = ApplicationServer.parseListeners(
-      config.getList(RestConfig.LISTENERS_CONFIG),
-      config.getListenerProtocolMap(),
-      0, ApplicationServer.SUPPORTED_URI_SCHEMES, "");
+    List<NamedURI> listeners = config.getListeners();
 
     assertEquals(2, listeners.size());
 
@@ -183,17 +180,14 @@ public class ApplicationServerTest {
     assertEquals(new URI("http://0.0.0.0:443"), listeners.get(1).getUri());
   }
 
-  @Test(expected = ConfigException.class)
+  @Test
   public void testParseDuplicateNamedListeners() throws URISyntaxException {
     Map<String, Object> props = new HashMap<>();
     props.put(RestConfig.LISTENERS_CONFIG, "INTERNAL://0.0.0.0:4000,INTERNAL://0.0.0.0:443");
     props.put(RestConfig.LISTENER_PROTOCOL_MAP_CONFIG, "INTERNAL:http");
     RestConfig config = new RestConfig(RestConfig.baseConfigDef(), props);
 
-    ApplicationServer.parseListeners(
-      config.getList(RestConfig.LISTENERS_CONFIG),
-      config.getListenerProtocolMap(),
-      0, ApplicationServer.SUPPORTED_URI_SCHEMES, "");
+    assertThrows(ConfigException.class, config::getListeners);
   }
 
   @Test
@@ -203,10 +197,7 @@ public class ApplicationServerTest {
     props.put(RestConfig.LISTENER_PROTOCOL_MAP_CONFIG, "INTERNAL:http,EXTERNAL:https");
     RestConfig config = new RestConfig(RestConfig.baseConfigDef(), props);
 
-    List<ApplicationServer.NamedURI> namedListeners = ApplicationServer.parseListeners(
-      config.getList(RestConfig.LISTENERS_CONFIG),
-      config.getListenerProtocolMap(),
-      0, ApplicationServer.SUPPORTED_URI_SCHEMES, "");
+    List<NamedURI> namedListeners = config.getListeners();
 
     assertEquals(2, namedListeners.size());
 
@@ -223,10 +214,7 @@ public class ApplicationServerTest {
     props.put(RestConfig.LISTENERS_CONFIG, "http://0.0.0.0:4000,https://0.0.0.0:443");
     RestConfig config = new RestConfig(RestConfig.baseConfigDef(), props);
 
-    List<ApplicationServer.NamedURI> namedListeners = ApplicationServer.parseListeners(
-      config.getList(RestConfig.LISTENERS_CONFIG),
-      config.getListenerProtocolMap(),
-      0, ApplicationServer.SUPPORTED_URI_SCHEMES, "");
+    List<NamedURI> namedListeners = config.getListeners();
 
     assertEquals(2, namedListeners.size());
 
@@ -235,6 +223,22 @@ public class ApplicationServerTest {
 
     assertNull(namedListeners.get(1).getName());
     assertEquals(new URI("https://0.0.0.0:443"), namedListeners.get(1).getUri());
+  }
+
+  @Test
+  public void testInvalidThreadPoolConfigQueueCapacityValid() throws Exception {
+    Map<String, Object> props = new HashMap<>();
+    props.put(RestConfig.REQUEST_QUEUE_CAPACITY_CONFIG, "1");
+    props.put(RestConfig.REQUEST_QUEUE_CAPACITY_INITIAL_CONFIG, "9");
+    RestConfig config = new RestConfig(RestConfig.baseConfigDef(), props);
+
+    server.stop();
+
+    ApplicationServer applicationServer = new ApplicationServer(config);
+    applicationServer.start();
+    assertEquals(9, applicationServer.getQueueCapacity());
+    applicationServer.stop();
+
   }
 
   // There is additional testing of parseListeners in ApplictionTest

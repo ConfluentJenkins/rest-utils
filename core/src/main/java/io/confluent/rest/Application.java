@@ -1,5 +1,5 @@
 /*
- * Copyright 2014 Confluent Inc.
+ * Copyright 2014 - 2022 Confluent Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,9 +16,40 @@
 
 package io.confluent.rest;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.jaxrs.base.JsonParseExceptionMapper;
+import static io.confluent.rest.RestConfig.REST_SERVLET_INITIALIZERS_CLASSES_CONFIG;
+import static io.confluent.rest.RestConfig.WEBSOCKET_SERVLET_INITIALIZERS_CLASSES_CONFIG;
+import static java.util.Collections.emptyMap;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import io.confluent.rest.auth.AuthUtil;
+import io.confluent.rest.errorhandlers.NoJettyDefaultStackTraceErrorHandler;
+import io.confluent.rest.exceptions.ConstraintViolationExceptionMapper;
+import io.confluent.rest.exceptions.GenericExceptionMapper;
+import io.confluent.rest.exceptions.WebApplicationExceptionMapper;
+import io.confluent.rest.exceptions.JsonMappingExceptionMapper;
+import io.confluent.rest.exceptions.JsonParseExceptionMapper;
+import io.confluent.rest.extension.ResourceExtension;
+import io.confluent.rest.filters.CsrfTokenProtectionFilter;
+import io.confluent.rest.metrics.MetricsResourceMethodApplicationListener;
+import io.confluent.rest.validation.JacksonMessageBodyProvider;
+import java.io.IOException;
+import java.net.URI;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.EnumSet;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
+import java.util.stream.Collectors;
+import javax.servlet.DispatcherType;
+import javax.servlet.ServletException;
+import javax.servlet.ServletRequest;
+import javax.ws.rs.core.Configurable;
 import org.apache.kafka.common.config.ConfigException;
 import org.apache.kafka.common.metrics.JmxReporter;
 import org.apache.kafka.common.metrics.MetricConfig;
@@ -56,40 +87,6 @@ import org.glassfish.jersey.server.validation.ValidationFeature;
 import org.glassfish.jersey.servlet.ServletContainer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import java.io.IOException;
-import java.net.URI;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.EnumSet;
-import java.util.HashMap;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Objects;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
-import java.util.function.Consumer;
-import java.util.stream.Collectors;
-
-import javax.servlet.DispatcherType;
-import javax.servlet.ServletException;
-import javax.servlet.ServletRequest;
-import javax.ws.rs.core.Configurable;
-
-import io.confluent.rest.auth.AuthUtil;
-import io.confluent.rest.exceptions.ConstraintViolationExceptionMapper;
-import io.confluent.rest.exceptions.GenericExceptionMapper;
-import io.confluent.rest.exceptions.WebApplicationExceptionMapper;
-import io.confluent.rest.exceptions.JsonMappingExceptionMapper;
-import io.confluent.rest.extension.ResourceExtension;
-import io.confluent.rest.filters.CsrfTokenProtectionFilter;
-import io.confluent.rest.metrics.MetricsResourceMethodApplicationListener;
-import io.confluent.rest.validation.JacksonMessageBodyProvider;
-
-import static io.confluent.rest.RestConfig.REST_SERVLET_INITIALIZERS_CLASSES_CONFIG;
-import static io.confluent.rest.RestConfig.WEBSOCKET_SERVLET_INITIALIZERS_CLASSES_CONFIG;
 
 /**
  * A REST application. Extend this class and implement setupResources() to register REST
@@ -133,7 +130,11 @@ public abstract class Application<T extends RestConfig> {
     logWriter.setLoggerName(config.getString(RestConfig.REQUEST_LOGGER_NAME_CONFIG));
 
     // %{ms}T logs request time in milliseconds
-    requestLog = new CustomRequestLog(logWriter, CustomRequestLog.EXTENDED_NCSA_FORMAT + " %{ms}T");
+    requestLog = new CustomRequestLog(logWriter, requestLogFormat());
+  }
+
+  protected String requestLogFormat() {
+    return CustomRequestLog.EXTENDED_NCSA_FORMAT + " %{ms}T";
   }
 
   public final String getPath() {
@@ -224,6 +225,7 @@ public abstract class Application<T extends RestConfig> {
   /**
    * expose SslContextFactory
    */
+  @Deprecated
   protected SslContextFactory getSslContextFactory() {
     return server.getSslContextFactory();
   }
@@ -307,6 +309,10 @@ public abstract class Application<T extends RestConfig> {
       context.setBaseResource(staticResources);
     }
 
+    if (isErrorStackTraceSuppressionEnabled()) {
+      context.setErrorHandler(new NoJettyDefaultStackTraceErrorHandler());
+    }
+
     configureSecurityHandler(context);
 
     if (isCorsEnabled()) {
@@ -330,6 +336,12 @@ public abstract class Application<T extends RestConfig> {
       context.addFilter(filterHolder, "/*", EnumSet.of(DispatcherType.REQUEST));
     }
 
+    if (isNoSniffProtectionEnabled()) {
+      FilterHolder filterHolder = new FilterHolder(new HeaderFilter());
+      filterHolder.setInitParameter("headerConfig", "set X-Content-Type-Options: nosniff");
+      context.addFilter(filterHolder, "/*", EnumSet.of(DispatcherType.REQUEST));
+    }
+
     if (isCsrfProtectionEnabled()) {
       String csrfEndpoint = config.getString(RestConfig.CSRF_PREVENTION_TOKEN_FETCH_ENDPOINT);
       int csrfTokenExpiration =
@@ -344,7 +356,6 @@ public abstract class Application<T extends RestConfig> {
           RestConfig.CSRF_PREVENTION_TOKEN_EXPIRATION_MINUTES, String.valueOf(csrfTokenExpiration));
       filterHolder.setInitParameter(
           RestConfig.CSRF_PREVENTION_TOKEN_MAX_ENTRIES, String.valueOf(csrfTokenMaxEntries));
-
       context.addFilter(filterHolder, "/*", EnumSet.of(DispatcherType.REQUEST));
     }
 
@@ -353,7 +364,7 @@ public abstract class Application<T extends RestConfig> {
       configureHttpResponseHeaderFilter(context);
     }
 
-    configureDosFilter(context);
+    configureDosFilters(context);
 
     configurePreResourceHandling(context);
     context.addFilter(servletHolder, "/*", null);
@@ -414,8 +425,16 @@ public abstract class Application<T extends RestConfig> {
     return AuthUtil.isCorsEnabled(config);
   }
 
+  private boolean isNoSniffProtectionEnabled() {
+    return config.getBoolean(RestConfig.NOSNIFF_PROTECTION_ENABLED);
+  }
+
   private boolean isCsrfProtectionEnabled() {
     return config.getBoolean(RestConfig.CSRF_PREVENTION_ENABLED);
+  }
+
+  private boolean isErrorStackTraceSuppressionEnabled() {
+    return config.getBoolean(RestConfig.SUPPRESS_STACK_TRACE_IN_RESPONSE);
   }
 
   @SuppressWarnings("unchecked")
@@ -481,10 +500,10 @@ public abstract class Application<T extends RestConfig> {
     // Support for named listeners is only implemented for the case of Applications
     // managed by ApplicationServer (direct instantiation of Application is to be
     // deprecated).
-    return ApplicationServer.parseListeners(
-      listenersConfig, Collections.emptyMap(), deprecatedPort, supportedSchemes, defaultScheme)
+    return RestConfig.parseListeners(
+            listenersConfig, emptyMap(), deprecatedPort, supportedSchemes, defaultScheme)
         .stream()
-        .map(ApplicationServer.NamedURI::getUri)
+        .map(NamedURI::getUri)
         .collect(Collectors.toList());
   }
 
@@ -611,6 +630,7 @@ public abstract class Application<T extends RestConfig> {
     config.register(jsonProvider);
     if (registerExceptionMapper) {
       config.register(JsonParseExceptionMapper.class);
+      config.register(JsonMappingExceptionMapper.class);
     }
   }
 
@@ -631,6 +651,7 @@ public abstract class Application<T extends RestConfig> {
   protected void registerExceptionMappers(Configurable<?> config, T restConfig) {
     config.register(ConstraintViolationExceptionMapper.class);
     config.register(JsonMappingExceptionMapper.class);
+    config.register(JsonParseExceptionMapper.class);
     config.register(new WebApplicationExceptionMapper(restConfig));
     config.register(new GenericExceptionMapper(restConfig));
   }
@@ -650,19 +671,34 @@ public abstract class Application<T extends RestConfig> {
     context.addFilter(headerFilterHolder, "/*", EnumSet.of(DispatcherType.REQUEST));
   }
 
-  private void configureDosFilter(ServletContextHandler context) {
+  private void configureDosFilters(ServletContextHandler context) {
     if (!config.isDosFilterEnabled()) {
       return;
     }
-    DoSFilter dosFilter;
-    if (!config.getDosFilterRemotePort() && config.getDosFilterTrackGlobal()) {
-      dosFilter = new GlobalDosFilter();
-    } else {
-      dosFilter = new DoSFilter();
-    }
+    // Ensure that the per connection limiter is first - KREST-8391
+    configureNonGlobalDosFilter(context);
+    configureGlobalDosFilter(context);
+  }
+
+  private void configureNonGlobalDosFilter(ServletContextHandler context) {
+    DoSFilter dosFilter = new DoSFilter();
+    FilterHolder filterHolder = configureFilter(dosFilter,
+        String.valueOf(config.getDosFilterMaxRequestsPerConnectionPerSec()));
+    context.addFilter(filterHolder, "/*", EnumSet.of(DispatcherType.REQUEST));
+  }
+  
+  private void configureGlobalDosFilter(ServletContextHandler context) {
+    DoSFilter dosFilter = new GlobalDosFilter();
+    String globalLimit = String.valueOf(config.getDosFilterMaxRequestsGlobalPerSec());
+    FilterHolder filterHolder = configureFilter(dosFilter, globalLimit);
+    context.addFilter(filterHolder, "/*", EnumSet.of(DispatcherType.REQUEST));
+  }
+
+  private FilterHolder configureFilter(DoSFilter dosFilter, String rate) {
+
     FilterHolder filterHolder = new FilterHolder(dosFilter);
     filterHolder.setInitParameter(
-        "maxRequestsPerSec", String.valueOf(config.getDosFilterMaxRequestsPerSec()));
+        "maxRequestsPerSec", rate);
     filterHolder.setInitParameter(
         "delayMs", String.valueOf(config.getDosFilterDelayMs().toMillis()));
     filterHolder.setInitParameter(
@@ -679,12 +715,13 @@ public abstract class Application<T extends RestConfig> {
         "insertHeaders", String.valueOf(config.getDosFilterInsertHeaders()));
     filterHolder.setInitParameter("trackSessions", "false");
     filterHolder.setInitParameter(
-        "remotePort", String.valueOf(config.getDosFilterRemotePort()));
+        "remotePort", String.valueOf("false"));
     filterHolder.setInitParameter(
         "ipWhitelist", String.valueOf(config.getDosFilterIpWhitelist()));
     filterHolder.setInitParameter(
         "managedAttr", String.valueOf(config.getDosFilterManagedAttr()));
-    context.addFilter(filterHolder, "/*", EnumSet.of(DispatcherType.REQUEST));
+    return filterHolder;
+
   }
 
   public T getConfiguration() {

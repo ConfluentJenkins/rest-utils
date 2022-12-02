@@ -31,7 +31,6 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.lang.reflect.Method;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.SortedMap;
@@ -44,6 +43,7 @@ import io.confluent.rest.annotations.PerformanceMetric;
 import org.apache.kafka.common.MetricName;
 import org.apache.kafka.common.metrics.Metrics;
 import org.apache.kafka.common.metrics.stats.Avg;
+import org.apache.kafka.common.metrics.stats.CumulativeCount;
 import org.apache.kafka.common.metrics.stats.Max;
 import org.apache.kafka.common.metrics.stats.Percentile;
 import org.apache.kafka.common.metrics.stats.Percentiles;
@@ -53,6 +53,8 @@ import org.apache.kafka.common.metrics.Sensor;
 import org.apache.kafka.common.utils.Time;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import static java.util.Collections.emptyMap;
 
 /**
  * Jersey ResourceMethodApplicationListener that records metrics for each endpoint by listening
@@ -66,23 +68,24 @@ public class MetricsResourceMethodApplicationListener implements ApplicationEven
   public static final String REQUEST_TAGS_PROP_KEY = "_request_tags";
 
   protected static final String HTTP_STATUS_CODE_TAG = "http_status_code";
-  private static final String[] HTTP_STATUS_CODE_TEXT = {
+  protected static final String[] HTTP_STATUS_CODE_TEXT = {
       "unknown", "1xx", "2xx", "3xx", "4xx", "5xx"};
   private static final int PERCENTILE_NUM_BUCKETS = 200;
   private static final double PERCENTILE_MAX_LATENCY_IN_MS = TimeUnit.SECONDS.toMillis(10);
+  private static final long SENSOR_EXPIRY_SECONDS = TimeUnit.HOURS.toSeconds(1);
 
   private final Metrics metrics;
   private final String metricGrpPrefix;
-  private Map<String, String> metricTags;
+  private final Map<String, String> metricTags;
   Time time;
-  private Map<Method, RequestScopedMetrics> methodMetrics = new HashMap<>();
+  private final Map<Method, RequestScopedMetrics> methodMetrics = new HashMap<>();
 
   public MetricsResourceMethodApplicationListener(Metrics metrics, String metricGrpPrefix,
-                                           Map<String,String> metricTags, Time time) {
+                                                  Map<String,String> metricTags, Time time) {
     super();
     this.metrics = metrics;
     this.metricGrpPrefix = metricGrpPrefix;
-    this.metricTags = (metricTags != null) ? metricTags : Collections.<String,String>emptyMap();
+    this.metricTags = (metricTags != null) ? metricTags : emptyMap();
     this.time = time;
   }
 
@@ -90,7 +93,8 @@ public class MetricsResourceMethodApplicationListener implements ApplicationEven
   public void onEvent(ApplicationEvent event) {
     if (event.getType() == ApplicationEvent.Type.INITIALIZATION_FINISHED) {
       // Special null key is used for global stats
-      MethodMetrics m = new MethodMetrics(null, null, this.metrics, metricGrpPrefix, metricTags);
+      MethodMetrics m = new MethodMetrics(
+          null, null, this.metrics, metricGrpPrefix, metricTags, emptyMap());
       methodMetrics.put(null, new RequestScopedMetrics(m, new ConstructionContext(this)));
 
       for (final Resource resource : event.getResourceModel().getResources()) {
@@ -112,7 +116,8 @@ public class MetricsResourceMethodApplicationListener implements ApplicationEven
     if (definitionMethod.isAnnotationPresent(PerformanceMetric.class)) {
       PerformanceMetric annotation = definitionMethod.getAnnotation(PerformanceMetric.class);
 
-      MethodMetrics m = new MethodMetrics(method, annotation, metrics, metricGrpPrefix, metricTags);
+      MethodMetrics m = new MethodMetrics(
+          method, annotation, metrics, metricGrpPrefix, metricTags, emptyMap());
       ConstructionContext context = new ConstructionContext(method, annotation, this);
       methodMetrics.put(definitionMethod, new RequestScopedMetrics(m, context));
     }
@@ -126,7 +131,7 @@ public class MetricsResourceMethodApplicationListener implements ApplicationEven
   private static class RequestScopedMetrics {
     private final MethodMetrics methodMetrics;
     private final ConstructionContext context;
-    private Map<SortedMap<String, String>, MethodMetrics> requestMetrics
+    private final Map<SortedMap<String, String>, MethodMetrics> requestMetrics
         = new ConcurrentHashMap<>();
 
     public RequestScopedMetrics(MethodMetrics metrics, ConstructionContext context) {
@@ -139,25 +144,21 @@ public class MetricsResourceMethodApplicationListener implements ApplicationEven
     }
 
     public MethodMetrics metrics(Map<String, String> requestTags) {
-      TreeMap<String, String> key = new TreeMap<>(requestTags);
-      return requestMetrics.compute(key, (k, v) -> v == null ? create(k) : v);
-    }
-
-    public MethodMetrics create(Map<String, String> requestTags) {
-      Map<String, String> allTags = new HashMap<>();
-      allTags.putAll(context.metricTags);
-      allTags.putAll(requestTags);
-      return new MethodMetrics(context.method, context.performanceMetric,
-          context.metrics, context.metricGrpPrefix, allTags);
+      // The key will also be used to identify a unique sensor,
+      // so we want to pass the sorted tags to MethodMetrics
+      SortedMap<String, String> key = new TreeMap<>(requestTags);
+      return requestMetrics.computeIfAbsent(key, (k) ->
+          new MethodMetrics(context.method, context.performanceMetric, context.metrics,
+              context.metricGrpPrefix, context.metricTags, k));
     }
   }
 
   private static class ConstructionContext {
-    private ResourceMethod method;
-    private PerformanceMetric performanceMetric;
-    private Map<String, String> metricTags;
-    private String metricGrpPrefix;
-    private Metrics metrics;
+    private final ResourceMethod method;
+    private final PerformanceMetric performanceMetric;
+    private final Map<String, String> metricTags;
+    private final String metricGrpPrefix;
+    private final Metrics metrics;
 
     public ConstructionContext(MetricsResourceMethodApplicationListener methodAppListener) {
       this(null, null, methodAppListener);
@@ -177,81 +178,98 @@ public class MetricsResourceMethodApplicationListener implements ApplicationEven
   }
 
   private static class MethodMetrics {
-    private Sensor requestSizeSensor;
-    private Sensor responseSizeSensor;
-    private Sensor requestLatencySensor;
+    private final Sensor requestSizeSensor;
+    private final Sensor responseSizeSensor;
+    private final Sensor requestLatencySensor;
     private Sensor errorSensor;
-    private Sensor[] errorSensorByStatus = new Sensor[6];
+    private final Sensor[] errorSensorByStatus = new Sensor[HTTP_STATUS_CODE_TEXT.length];
 
     public MethodMetrics(ResourceMethod method, PerformanceMetric annotation, Metrics metrics,
-                         String metricGrpPrefix, Map<String, String> metricTags) {
+                         String metricGrpPrefix, Map<String, String> metricTags,
+                         Map<String, String> requestTags) {
       String metricGrpName = metricGrpPrefix + "-metrics";
+      // The tags will be used to generate MBean names if JmxReporter is used,
+      // sort to get consistent names
+      Map<String, String> allTags = new TreeMap<>(metricTags);
+      allTags.putAll(requestTags);
 
-      this.requestSizeSensor = metrics.sensor(getName(method, annotation, "request-size"));
+      this.requestSizeSensor = metrics.sensor(
+          getName(method, annotation, "request-size", requestTags),
+          null, SENSOR_EXPIRY_SECONDS, Sensor.RecordingLevel.INFO, (Sensor[]) null);
       MetricName metricName = new MetricName(
           getName(method, annotation, "request-count"), metricGrpName,
-          "The request count using a windowed counter", metricTags);
+          "The request count using a windowed counter", allTags);
       this.requestSizeSensor.add(metricName, new WindowedCount());
       metricName = new MetricName(
           getName(method, annotation, "request-rate"), metricGrpName,
-          "The average number of HTTP requests per second.", metricTags);
+          "The average number of HTTP requests per second.", allTags);
       this.requestSizeSensor.add(metricName, new Rate(new WindowedCount()));
       metricName = new MetricName(
+          getName(method, annotation, "request-total"), metricGrpName,
+          "The request count using a cumulative counter", allTags);
+      this.requestSizeSensor.add(metricName, new CumulativeCount());
+      metricName = new MetricName(
           getName(method, annotation, "request-byte-rate"), metricGrpName,
-          "Bytes/second of incoming requests", metricTags);
+          "Bytes/second of incoming requests", allTags);
       this.requestSizeSensor.add(metricName, new Avg());
       metricName = new MetricName(
           getName(method, annotation, "request-size-avg"), metricGrpName,
-          "The average request size in bytes", metricTags);
+          "The average request size in bytes", allTags);
       this.requestSizeSensor.add(metricName, new Avg());
       metricName = new MetricName(
           getName(method, annotation, "request-size-max"), metricGrpName,
-          "The maximum request size in bytes", metricTags);
+          "The maximum request size in bytes", allTags);
       this.requestSizeSensor.add(metricName, new Max());
 
-      this.responseSizeSensor = metrics.sensor(getName(method, annotation, "response-size"));
+      this.responseSizeSensor = metrics.sensor(
+          getName(method, annotation, "response-size", requestTags),
+          null, SENSOR_EXPIRY_SECONDS, Sensor.RecordingLevel.INFO, (Sensor[]) null);
       metricName = new MetricName(
           getName(method, annotation, "response-rate"), metricGrpName,
-          "The average number of HTTP responses per second.", metricTags);
+          "The average number of HTTP responses per second.", allTags);
       this.responseSizeSensor.add(metricName, new Rate(new WindowedCount()));
       metricName = new MetricName(
           getName(method, annotation, "response-byte-rate"), metricGrpName,
-          "Bytes/second of outgoing responses", metricTags);
+          "Bytes/second of outgoing responses", allTags);
       this.responseSizeSensor.add(metricName, new Avg());
       metricName = new MetricName(
           getName(method, annotation, "response-size-avg"), metricGrpName,
-          "The average response size in bytes", metricTags);
+          "The average response size in bytes", allTags);
       this.responseSizeSensor.add(metricName, new Avg());
       metricName = new MetricName(
           getName(method, annotation, "response-size-max"), metricGrpName,
-          "The maximum response size in bytes", metricTags);
+          "The maximum response size in bytes", allTags);
       this.responseSizeSensor.add(metricName, new Max());
 
-      this.requestLatencySensor = metrics.sensor(getName(method, annotation, "request-latency"));
+      this.requestLatencySensor = metrics.sensor(
+          getName(method, annotation, "request-latency", requestTags),
+          null, SENSOR_EXPIRY_SECONDS, Sensor.RecordingLevel.INFO, (Sensor[]) null);
       metricName = new MetricName(
           getName(method, annotation, "request-latency-avg"), metricGrpName,
-          "The average request latency in ms", metricTags);
+          "The average request latency in ms", allTags);
       this.requestLatencySensor.add(metricName, new Avg());
       metricName = new MetricName(
           getName(method, annotation, "request-latency-max"), metricGrpName,
-          "The maximum request latency in ms", metricTags);
+          "The maximum request latency in ms", allTags);
       this.requestLatencySensor.add(metricName, new Max());
 
       Percentiles percs = new Percentiles(Float.SIZE / 8 * PERCENTILE_NUM_BUCKETS,
           0.0,
           PERCENTILE_MAX_LATENCY_IN_MS,
-          Percentiles.BucketSizing.CONSTANT,
+          Percentiles.BucketSizing.LINEAR,
           new Percentile(new MetricName(
               getName(method, annotation, "request-latency-95"), metricGrpName,
-              "The 95th percentile request latency in ms", metricTags), 95),
+              "The 95th percentile request latency in ms", allTags), 95),
           new Percentile(new MetricName(
               getName(method, annotation, "request-latency-99"), metricGrpName,
-              "The 99th percentile request latency in ms", metricTags), 99));
+              "The 99th percentile request latency in ms", allTags), 99));
       this.requestLatencySensor.add(percs);
 
-      for (int i = 0; i < 6; i++) {
-        errorSensorByStatus[i] = metrics.sensor(getName(method, annotation, "errors" + i));
-        HashMap<String, String> tags = new HashMap<>(metricTags);
+      for (int i = 0; i < errorSensorByStatus.length; i++) {
+        errorSensorByStatus[i] = metrics.sensor(
+            getName(method, annotation, "errors" + i, requestTags),
+            null, SENSOR_EXPIRY_SECONDS, Sensor.RecordingLevel.INFO, (Sensor[]) null);
+        SortedMap<String, String> tags = new TreeMap<>(allTags);
         tags.put(HTTP_STATUS_CODE_TAG, HTTP_STATUS_CODE_TEXT[i]);
         metricName = new MetricName(getName(method, annotation, "request-error-rate"),
             metricGrpName,
@@ -267,23 +285,33 @@ public class MetricsResourceMethodApplicationListener implements ApplicationEven
                 + HTTP_STATUS_CODE_TEXT[i], tags);
         errorSensorByStatus[i].add(metricName, new WindowedCount());
 
+        metricName = new MetricName(getName(method, annotation, "request-error-total"),
+            metricGrpName,
+            "A cumulative count of requests that resulted in an HTTP error response with code - "
+                + HTTP_STATUS_CODE_TEXT[i], tags);
+        errorSensorByStatus[i].add(metricName, new CumulativeCount());
       }
 
-      this.errorSensor = metrics.sensor(getName(method, annotation, "errors"));
+      this.errorSensor = metrics.sensor(getName(method, annotation, "errors", requestTags),
+          null, SENSOR_EXPIRY_SECONDS, Sensor.RecordingLevel.INFO, (Sensor[]) null);
       metricName = new MetricName(
           getName(method, annotation, "request-error-rate"),
           metricGrpName,
           "The average number of requests per second that resulted in HTTP error responses",
-          metricTags);
+          allTags);
       this.errorSensor.add(metricName, new Rate());
-
-      this.errorSensor = metrics.sensor(getName(method, annotation, "errors-count"));
       metricName = new MetricName(
           getName(method, annotation, "request-error-count"),
           metricGrpName,
           "A windowed count of requests that resulted in HTTP error responses",
-          metricTags);
+          allTags);
       this.errorSensor.add(metricName, new WindowedCount());
+      metricName = new MetricName(
+          getName(method, annotation, "request-error-total"),
+          metricGrpName,
+          "A cumulative count of requests that resulted in HTTP error responses",
+          allTags);
+      this.errorSensor.add(metricName, new CumulativeCount());
     }
 
     /**
@@ -306,7 +334,7 @@ public class MetricsResourceMethodApplicationListener implements ApplicationEven
           ? event.getContainerResponse().getStatus() / 100 : 5;
 
       // Index 0 means "unknown" status codes.
-      if (idx <= 0 || idx >= 6) {
+      if (idx <= 0 || idx >= HTTP_STATUS_CODE_TEXT.length) {
         log.error("Unidentified exception to record metrics against", event.getException());
         idx = 0;
       }
@@ -316,7 +344,13 @@ public class MetricsResourceMethodApplicationListener implements ApplicationEven
     }
 
     private static String getName(final ResourceMethod method,
-                                  final PerformanceMetric annotation, String metric) {
+                                  final PerformanceMetric annotation, final String metric) {
+      return getName(method, annotation, metric, null);
+    }
+
+    private static String getName(final ResourceMethod method,
+                                  final PerformanceMetric annotation, final String metric,
+                                  final Map<String, String> requestTags) {
       StringBuilder builder = new StringBuilder();
       boolean prefixed = false;
       if (annotation != null && !annotation.value().equals(PerformanceMetric.DEFAULT_NAME)) {
@@ -334,9 +368,11 @@ public class MetricsResourceMethodApplicationListener implements ApplicationEven
         builder.append('.');
       }
       builder.append(metric);
+      if (requestTags != null) {
+        requestTags.forEach((k, v) -> builder.append(".").append(k).append("=").append(v));
+      }
       return builder.toString();
     }
-
   }
 
   private static class MetricsRequestEventListener implements RequestEventListener {
@@ -410,6 +446,8 @@ public class MetricsResourceMethodApplicationListener implements ApplicationEven
       Object tagsObj = event.getContainerRequest().getProperty(REQUEST_TAGS_PROP_KEY);
 
       if (tagsObj == null) {
+        // Method metrics without request tags don't necessarily represent method level aggregations
+        // e.g., when invocations of a method have both requests w/ and w/o tags
         return metrics.metrics();
       }
       if (!(tagsObj instanceof Map<?, ?>)) {
@@ -510,4 +548,3 @@ public class MetricsResourceMethodApplicationListener implements ApplicationEven
     }
   }
 }
-

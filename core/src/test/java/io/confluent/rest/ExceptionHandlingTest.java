@@ -16,7 +16,7 @@
 
 package io.confluent.rest;
 
-import static org.junit.Assert.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -31,10 +31,11 @@ import javax.ws.rs.client.Entity;
 import javax.ws.rs.core.Configurable;
 import javax.ws.rs.core.Response;
 
+import io.confluent.rest.exceptions.RestTimeoutException;
 import org.eclipse.jetty.server.Server;
-import org.junit.After;
-import org.junit.Before;
-import org.junit.Test;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 import io.confluent.rest.entities.ErrorMessage;
 import io.confluent.rest.exceptions.RestNotFoundException;
@@ -49,7 +50,7 @@ public class ExceptionHandlingTest {
   private Server server;
   private ExceptionApplication application;
 
-  @Before
+  @BeforeEach
   public void setUp() throws Exception {
     Properties props = new Properties();
     props.setProperty("debug", "false");
@@ -60,7 +61,7 @@ public class ExceptionHandlingTest {
     server.start();
   }
 
-  @After
+  @AfterEach
   public void tearDown() throws Exception {
     server.stop();
     server.join();
@@ -115,6 +116,14 @@ public class ExceptionHandlingTest {
     // is the one case we want to be certain we don't leak extra info
     testGetException("/unexpected", 500, 50001,
                      Response.Status.INTERNAL_SERVER_ERROR.getReasonPhrase());
+  }
+
+  @Test
+  public void testRestTimeoutException() {
+    Map<String, String> m = new HashMap<>();
+    m.put("something", "something");
+    m.put("something-else", "something-else");
+    testPostException("readTimeout",  Entity.json(m), 408, 408, "Idle timeout expired" );
   }
 
   public static class FakeType {
@@ -172,6 +181,12 @@ public class ExceptionHandlingTest {
     @Path("/unrecognizedfield")
     public String blah(FakeType ft) {
       return ft.something;
+    }
+
+    @POST
+    @Path("/readTimeout")
+    public String restTimeout() {
+      throw new RestTimeoutException("Idle timeout expired", 408, 408);
     }
   }
 

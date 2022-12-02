@@ -16,26 +16,34 @@
 
 package io.confluent.rest;
 
+import static com.google.common.collect.ImmutableMap.toImmutableMap;
+import static java.util.Collections.emptyList;
+import static java.util.Collections.singletonList;
+import static java.util.Collections.unmodifiableList;
+import static org.apache.kafka.clients.CommonClientConfigs.METRICS_CONTEXT_PREFIX;
+
 import io.confluent.rest.extension.ResourceExtension;
 import io.confluent.rest.metrics.RestMetricsContext;
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.time.Duration;
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.TreeMap;
+import java.util.Optional;
 import java.util.Set;
+import java.util.TreeMap;
+import java.util.function.Function;
 import java.util.stream.Collectors;
+import javax.ws.rs.core.UriBuilder;
+import javax.ws.rs.core.UriBuilderException;
 import org.apache.kafka.common.config.AbstractConfig;
 import org.apache.kafka.common.config.ConfigException;
 import org.apache.kafka.common.config.ConfigDef;
 import org.apache.kafka.common.config.ConfigDef.Type;
 import org.apache.kafka.common.config.ConfigDef.Importance;
 import org.apache.kafka.common.utils.Time;
-
-import static java.util.Collections.emptyList;
-import static org.apache.kafka.clients.CommonClientConfigs.METRICS_CONTEXT_PREFIX;
 
 public class RestConfig extends AbstractConfig {
 
@@ -113,6 +121,12 @@ public class RestConfig extends AbstractConfig {
       "Set value to Jetty Access-Control-Allow-Origin header for specified headers. "
       + "Leave blank to use Jetty's default.";
   protected static final String ACCESS_CONTROL_ALLOW_HEADERS_DEFAULT = "";
+
+  public static final String NOSNIFF_PROTECTION_ENABLED = "nosniff.prevention.enable";
+  public static final boolean NOSNIFF_PROTECTION_ENABLED_DEFAULT = false;
+  protected static final String NOSNIFF_PROTECTION_ENABLED_DOC =
+      "Enable response to request be blocked due to nosniff. The header allows you to avoid "
+      + "MIME type sniffing by saying that the MIME types are deliberately configured.";
 
   public static final String REQUEST_LOGGER_NAME_CONFIG = "request.logger.name";
   protected static final String REQUEST_LOGGER_NAME_DOC =
@@ -222,7 +236,7 @@ public class RestConfig extends AbstractConfig {
   @Deprecated
   public static final String SSL_CLIENT_AUTH_CONFIG = "ssl.client.auth";
   protected static final String SSL_CLIENT_AUTH_DOC =
-      "Whether or not to require the https client to authenticate via the server's trust store. " 
+      "Whether or not to require the https client to authenticate via the server's trust store. "
           + "Deprecated; please use " + SSL_CLIENT_AUTHENTICATION_CONFIG + " instead.";
   protected static final boolean SSL_CLIENT_AUTH_DEFAULT = false;
   public static final String SSL_ENABLED_PROTOCOLS_CONFIG = "ssl.enabled.protocols";
@@ -263,7 +277,7 @@ public class RestConfig extends AbstractConfig {
   public static final String AUTHENTICATION_ROLES_CONFIG = "authentication.roles";
   public static final String AUTHENTICATION_ROLES_DOC = "Valid roles to authenticate against.";
   public static final List<String> AUTHENTICATION_ROLES_DEFAULT =
-      Collections.unmodifiableList(Arrays.asList("*"));
+      unmodifiableList(Arrays.asList("*"));
 
   public static final String AUTHENTICATION_SKIP_PATHS = "authentication.skip.paths";
   public static final String AUTHENTICATION_SKIP_PATHS_DOC = "Comma separated list of paths that "
@@ -371,9 +385,16 @@ public class RestConfig extends AbstractConfig {
   private static final String DOS_FILTER_MAX_REQUESTS_PER_SEC_CONFIG =
       "dos.filter.max.requests.per.sec";
   private static final String DOS_FILTER_MAX_REQUESTS_PER_SEC_DOC =
-      "Maximum number of requests from a connection per second. Requests in excess of this are "
-          + "first delayed, then throttled. Default is 25.";
+      "Maximum number of requests per second for the REST instance. Requests in excess of this "
+          + "are first delayed, then throttled. Default is 25.";
   private static final int DOS_FILTER_MAX_REQUESTS_PER_SEC_DEFAULT = 25;
+
+  private static final String DOS_FILTER_MAX_REQUESTS_PER_CONNECTION_PER_SEC_CONFIG =
+      "dos.filter.max.requests.per.connection.per.sec";
+  private static final String DOS_FILTER_MAX_REQUESTS_PER_CONNECTION_PER_SEC_DOC =
+      "Maximum number of requests per second per ipaddress for the rest instance. "
+          + "Requests in excess of this are first delayed, then throttled.";
+  private static final int DOS_FILTER_MAX_REQUESTS_PER_CONNECTION_PER_SEC_DEFAULT = 25;
 
   private static final String DOS_FILTER_DELAY_MS_CONFIG = "dos.filter.delay.ms";
   private static final String DOS_FILTER_DELAY_MS_DOC =
@@ -414,18 +435,6 @@ public class RestConfig extends AbstractConfig {
       "If true, insert the DoSFilter headers into the response. Defaults to true.";
   private static final boolean DOS_FILTER_INSERT_HEADERS_DEFAULT = true;
 
-  private static final String DOS_FILTER_REMOTE_PORT_CONFIG = "dos.filter.remote.port";
-  private static final String DOS_FILTER_REMOTE_PORT_DOC =
-      "If true, then rate is tracked by IP and port (effectively per connection). Defaults to "
-          + "false.";
-  private static final boolean DOS_FILTER_REMOTE_PORT_DEFAULT = false;
-
-  private static final String DOS_FILTER_TRACK_GLOBAL_CONFIG = "dos.filter.track.global";
-  private static final String DOS_FILTER_TRACK_GLOBAL_DOC =
-      "If true and remote port tracking is not used, then rate is tracked globally for all "
-          + "connections. Defaults to false.";
-  private static final boolean DOS_FILTER_TRACK_GLOBAL_DEFAULT = false;
-
   private static final String DOS_FILTER_IP_WHITELIST_CONFIG = "dos.filter.ip.whitelist";
   private static final String DOS_FILTER_IP_WHITELIST_DOC =
       "A comma-separated list of IP addresses that will not be rate limited.";
@@ -438,6 +447,26 @@ public class RestConfig extends AbstractConfig {
           + "JMX via ContextHandler.MANAGED_ATTRIBUTES) to manage the configuration of the filter."
           + "Default is false.";
   private static final boolean DOS_FILTER_MANAGED_ATTR_DEFAULT = false;
+
+  private static final String SERVER_CONNECTION_LIMIT = "server.connection.limit";
+  private static final String SERVER_CONNECTION_LIMIT_DOC =
+      "Limits the number of active connections on that server to the configured number. Once that "
+          + "limit is reached further connections will not be accepted until the number of active "
+          + "connections goes below that limit again. Active connections here means all already "
+          + "opened connections plus all connections that are in the process of being accepted. "
+          + "If the limit is set to a non-positive number, no limit is applied. Default is 0.";
+  private static final int SERVER_CONNECTION_LIMIT_DEFAULT = 0;
+
+  // For rest-utils applications connectors correspond to configured listeners. See
+  // ApplicationServer#parseListeners for more details.
+  private static final String CONNECTOR_CONNECTION_LIMIT = "connector.connection.limit";
+  private static final String CONNECTOR_CONNECTION_LIMIT_DOC =
+      "Limits the number of active connections per connector to the configured number. Once that "
+          + "limit is reached further connections will not be accepted until the number of active "
+          + "connections goes below that limit again. Active connections here means all already "
+          + "opened connections plus all connections that are in the process of being accepted. "
+          + "If the limit is set to a non-positive number, no limit is applied. Default is 0.";
+  private static final int CONNECTOR_CONNECTION_LIMIT_DEFAULT = 0;
 
   public static final String HTTP2_ENABLED_CONFIG = "http2.enabled";
   protected static final String HTTP2_ENABLED_DOC =
@@ -459,6 +488,17 @@ public class RestConfig extends AbstractConfig {
           + "https://www.haproxy.org/download/1.8/doc/proxy-protocol.txt for more information. "
           + "Default is false.";
   protected static final boolean PROXY_PROTOCOL_ENABLED_DEFAULT = false;
+
+  public static final String SUPPRESS_STACK_TRACE_IN_RESPONSE = "suppress.stack.trace.response";
+
+  protected static final String SUPPRESS_STACK_TRACE_IN_RESPONSE_DOC =
+      "If true, enable overall error handling for any uncaught errors in handlers pipeline. "
+          + "This ensures that no stack traces are included in responses to clients.";
+
+  protected static final boolean SUPPRESS_STACK_TRACE_IN_RESPONSE_DEFAULT = true;
+
+  static final List<String> SUPPORTED_URI_SCHEMES =
+      unmodifiableList(Arrays.asList("http", "https"));
 
   public static ConfigDef baseConfigDef() {
     return baseConfigDef(
@@ -858,6 +898,12 @@ public class RestConfig extends AbstractConfig {
             Importance.LOW,
             DOS_FILTER_MAX_REQUESTS_PER_SEC_DOC
         ).define(
+            DOS_FILTER_MAX_REQUESTS_PER_CONNECTION_PER_SEC_CONFIG,
+            Type.INT,
+            DOS_FILTER_MAX_REQUESTS_PER_CONNECTION_PER_SEC_DEFAULT,
+            Importance.LOW,
+            DOS_FILTER_MAX_REQUESTS_PER_CONNECTION_PER_SEC_DOC
+        ).define(
             DOS_FILTER_DELAY_MS_CONFIG,
             Type.LONG,
             DOS_FILTER_DELAY_MS_DEFAULT.toMillis(),
@@ -900,18 +946,6 @@ public class RestConfig extends AbstractConfig {
             Importance.LOW,
             DOS_FILTER_INSERT_HEADERS_DOC
         ).define(
-            DOS_FILTER_REMOTE_PORT_CONFIG,
-            Type.BOOLEAN,
-            DOS_FILTER_REMOTE_PORT_DEFAULT,
-            Importance.LOW,
-            DOS_FILTER_REMOTE_PORT_DOC
-        ).define(
-            DOS_FILTER_TRACK_GLOBAL_CONFIG,
-            Type.BOOLEAN,
-            DOS_FILTER_TRACK_GLOBAL_DEFAULT,
-            Importance.LOW,
-            DOS_FILTER_TRACK_GLOBAL_DOC
-        ).define(
             DOS_FILTER_IP_WHITELIST_CONFIG,
             Type.LIST,
             DOS_FILTER_IP_WHITELIST_DEFAULT,
@@ -923,6 +957,18 @@ public class RestConfig extends AbstractConfig {
             DOS_FILTER_MANAGED_ATTR_DEFAULT,
             Importance.LOW,
             DOS_FILTER_MANAGED_ATTR_DOC
+        ).define(
+            SERVER_CONNECTION_LIMIT,
+            Type.INT,
+            SERVER_CONNECTION_LIMIT_DEFAULT,
+            Importance.LOW,
+            SERVER_CONNECTION_LIMIT_DOC
+        ).define(
+            CONNECTOR_CONNECTION_LIMIT,
+            Type.INT,
+            CONNECTOR_CONNECTION_LIMIT_DEFAULT,
+            Importance.LOW,
+            CONNECTOR_CONNECTION_LIMIT_DOC
         ).define(
             HTTP2_ENABLED_CONFIG,
             Type.BOOLEAN,
@@ -941,6 +987,18 @@ public class RestConfig extends AbstractConfig {
             PROXY_PROTOCOL_ENABLED_DEFAULT,
             Importance.LOW,
             PROXY_PROTOCOL_ENABLED_DOC
+        ).define(
+            NOSNIFF_PROTECTION_ENABLED,
+            Type.BOOLEAN,
+            NOSNIFF_PROTECTION_ENABLED_DEFAULT,
+            Importance.LOW,
+            NOSNIFF_PROTECTION_ENABLED_DOC
+        ).define(
+            SUPPRESS_STACK_TRACE_IN_RESPONSE,
+            Type.BOOLEAN,
+            SUPPRESS_STACK_TRACE_IN_RESPONSE_DEFAULT,
+            Importance.LOW,
+            SUPPRESS_STACK_TRACE_IN_RESPONSE_DOC
         );
   }
 
@@ -1019,7 +1077,11 @@ public class RestConfig extends AbstractConfig {
     return getBoolean(DOS_FILTER_ENABLED_CONFIG);
   }
 
-  public final int getDosFilterMaxRequestsPerSec() {
+  public final int getDosFilterMaxRequestsPerConnectionPerSec() {
+    return getInt(DOS_FILTER_MAX_REQUESTS_PER_CONNECTION_PER_SEC_CONFIG);
+  }
+
+  public final int getDosFilterMaxRequestsGlobalPerSec() {
     return getInt(DOS_FILTER_MAX_REQUESTS_PER_SEC_CONFIG);
   }
 
@@ -1051,20 +1113,49 @@ public class RestConfig extends AbstractConfig {
     return getBoolean(DOS_FILTER_INSERT_HEADERS_CONFIG);
   }
 
-  public final boolean getDosFilterRemotePort() {
-    return getBoolean(DOS_FILTER_REMOTE_PORT_CONFIG);
-  }
-
-  public final boolean getDosFilterTrackGlobal() {
-    return getBoolean(DOS_FILTER_TRACK_GLOBAL_CONFIG);
-  }
-
   public final List<String> getDosFilterIpWhitelist() {
     return getList(DOS_FILTER_IP_WHITELIST_CONFIG);
   }
 
   public final boolean getDosFilterManagedAttr() {
     return getBoolean(DOS_FILTER_MANAGED_ATTR_CONFIG);
+  }
+
+  public final int getServerConnectionLimit() {
+    return getInt(SERVER_CONNECTION_LIMIT);
+  }
+
+  public final int getConnectorConnectionLimit() {
+    return getInt(CONNECTOR_CONNECTION_LIMIT);
+  }
+
+  public final List<NamedURI> getListeners() {
+    return parseListeners(
+        getList(RestConfig.LISTENERS_CONFIG),
+        getListenerProtocolMap(),
+        getInt(RestConfig.PORT_CONFIG),
+        SUPPORTED_URI_SCHEMES,
+        "http");
+  }
+
+  public final SslConfig getBaseSslConfig() {
+    return new SslConfig(this);
+  }
+
+  private SslConfig getSslConfig(NamedURI listener) {
+    String prefix =
+        "listener.name." + Optional.ofNullable(listener.getName()).orElse("https") + ".";
+
+    Map<String, Object> overridden = originals();
+    overridden.putAll(filterByAndStripPrefix(originals(), prefix));
+
+    return new SslConfig(new RestConfig(baseConfigDef(), overridden));
+  }
+
+  public final Map<NamedURI, SslConfig> getSslConfigs() {
+    return getListeners().stream()
+        .filter(listener -> listener.getUri().getScheme().equals("https"))
+        .collect(toImmutableMap(Function.identity(), this::getSslConfig));
   }
 
   public final Map<String, String> getMap(String propertyName) {
@@ -1088,6 +1179,66 @@ public class RestConfig extends AbstractConfig {
     return map;
   }
 
+  static List<NamedURI> parseListeners(
+      List<String> listeners,
+      Map<String,String> listenerProtocolMap,
+      int deprecatedPort,
+      List<String> supportedSchemes,
+      String defaultScheme) {
+
+    // handle deprecated case, using PORT_CONFIG.
+    // TODO: remove this when `PORT_CONFIG` is deprecated, because LISTENER_CONFIG
+    // will have a default value which includes the default port.
+    if (listeners.isEmpty() || listeners.get(0).isEmpty()) {
+      listeners = singletonList(defaultScheme + "://0.0.0.0:" + deprecatedPort);
+    }
+
+    List<NamedURI> uris = listeners.stream()
+        .map(listener -> constructNamedURI(listener, listenerProtocolMap, supportedSchemes))
+        .collect(Collectors.toList());
+    List<NamedURI> namedUris =
+        uris.stream().filter(uri -> uri.getName() != null).collect(Collectors.toList());
+
+    if (namedUris.stream().map(NamedURI::getName).distinct().count() != namedUris.size()) {
+      throw new ConfigException(
+          "More than one listener was specified with same name. Listener names must be unique.");
+    }
+
+    return uris;
+  }
+
+  private static NamedURI constructNamedURI(
+      String listener, Map<String,String> listenerProtocolMap, List<String> supportedSchemes) {
+    URI uri;
+    try {
+      uri = new URI(listener);
+    } catch (URISyntaxException e) {
+      throw new ConfigException(
+          "Listener '" + listener + "' is not a valid URI: " + e.getMessage());
+    }
+    if (uri.getPort() == -1) {
+      throw new ConfigException(
+          "Listener '" + listener + "' must specify a port.");
+    }
+    if (supportedSchemes.contains(uri.getScheme())) {
+      return new NamedURI(uri, null); // unnamed.
+    }
+    String uriName = uri.getScheme().toLowerCase();
+    String protocol = listenerProtocolMap.get(uriName);
+    if (protocol == null) {
+      throw new ConfigException(
+          "Listener '" + uri + "' has an unsupported scheme '" + uri.getScheme() + "'");
+    }
+    try {
+      return new NamedURI(
+          UriBuilder.fromUri(listener).scheme(protocol).build(),
+          uriName);
+    } catch (UriBuilderException e) {
+      throw new ConfigException(
+          "Listener '" + listener + "' with protocol '" + protocol + "' is not a valid URI.");
+    }
+  }
+
   public final Map<String, String> getListenerProtocolMap() {
     Map<String, String> result = getMap(LISTENER_PROTOCOL_MAP_CONFIG)
         .entrySet()
@@ -1096,12 +1247,12 @@ public class RestConfig extends AbstractConfig {
             e -> e.getKey().toLowerCase(),
             e -> e.getValue().toLowerCase()));
     for (Map.Entry<String, String> entry : result.entrySet()) {
-      if (!ApplicationServer.SUPPORTED_URI_SCHEMES.contains(entry.getValue())) {
+      if (!SUPPORTED_URI_SCHEMES.contains(entry.getValue())) {
         throw new ConfigException(
             "Listener '" + entry.getKey()
             + "' specifies an unsupported protocol: " + entry.getValue());
       }
-      if (ApplicationServer.SUPPORTED_URI_SCHEMES.contains(entry.getKey())) {
+      if (SUPPORTED_URI_SCHEMES.contains(entry.getKey())) {
         // forbid http:https and https:http
         if (!entry.getKey().equals(entry.getValue())) {
           throw new ConfigException(

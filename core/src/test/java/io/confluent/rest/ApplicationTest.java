@@ -21,15 +21,16 @@ import static org.apache.kafka.common.metrics.MetricsContext.NAMESPACE;
 import static org.hamcrest.CoreMatchers.containsString;
 import static org.hamcrest.CoreMatchers.is;
 import static org.hamcrest.MatcherAssert.assertThat;
-import static org.junit.Assert.assertArrayEquals;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertThrows;
-import static org.junit.Assert.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.google.common.collect.ImmutableMap;
 import io.confluent.rest.extension.ResourceExtension;
+import io.confluent.rest.metrics.RestMetricsContext;
 import java.io.IOException;
 import java.lang.management.ManagementFactory;
 import java.net.URI;
@@ -50,8 +51,6 @@ import javax.ws.rs.Path;
 import javax.ws.rs.Produces;
 import javax.ws.rs.core.Configurable;
 import javax.ws.rs.core.MediaType;
-
-import io.confluent.rest.metrics.RestMetricsContext;
 import org.apache.http.client.methods.CloseableHttpResponse;
 import org.apache.http.client.methods.HttpGet;
 import org.apache.http.impl.client.CloseableHttpClient;
@@ -68,15 +67,15 @@ import org.eclipse.jetty.security.authentication.BasicAuthenticator;
 import org.eclipse.jetty.server.ServerConnector;
 import org.eclipse.jetty.servlet.ServletContextHandler;
 import org.eclipse.jetty.util.security.Constraint;
-import org.junit.After;
-import org.junit.Before;
-import org.junit.Test;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 public class ApplicationTest {
 
   private static final String REALM = "realm";
 
-  @Before
+  @BeforeEach
   public void setUp() {
     TestApp.SHUTDOWN_CALLED.set(false);
     TestRegistryExtension.CLOSE_CALLED.set(false);
@@ -84,12 +83,12 @@ public class ApplicationTest {
 
   private TestApp application;
 
-  @Before
+  @BeforeEach
   public void setup() throws Exception {
     application = new TestApp();
   }
 
-  @After
+  @AfterEach
   public void tearDown() throws Exception {
     application.stop();
   }
@@ -97,9 +96,10 @@ public class ApplicationTest {
   @Test
   public void testParseListenersDeprecated() {
     List<String> listenersConfig = new ArrayList<>();
-    List<URI> listeners = Application.parseListeners(listenersConfig, RestConfig.PORT_CONFIG_DEFAULT,
-            ApplicationServer.SUPPORTED_URI_SCHEMES, "http");
-    assertEquals("Should have only one listener.", 1, listeners.size());
+    List<URI> listeners = Application.parseListeners(listenersConfig,
+        RestConfig.PORT_CONFIG_DEFAULT,
+        RestConfig.SUPPORTED_URI_SCHEMES, "http");
+    assertEquals(1, listeners.size(), "Should have only one listener.");
     assertExpectedUri(listeners.get(0), "http", "0.0.0.0", RestConfig.PORT_CONFIG_DEFAULT);
   }
 
@@ -108,40 +108,52 @@ public class ApplicationTest {
     List<String> listenersConfig = new ArrayList<>();
     listenersConfig.add("http://localhost:123");
     listenersConfig.add("https://localhost:124");
-    List<URI> listeners = Application.parseListeners(listenersConfig, -1, ApplicationServer.SUPPORTED_URI_SCHEMES, "http");
-    assertEquals("Should have two listeners.", 2, listeners.size());
+    List<URI> listeners = Application.parseListeners(listenersConfig, -1,
+        RestConfig.SUPPORTED_URI_SCHEMES, "http");
+    assertEquals(2, listeners.size(), "Should have two listeners.");
     assertExpectedUri(listeners.get(0), "http", "localhost", 123);
     assertExpectedUri(listeners.get(1), "https", "localhost", 124);
   }
 
-  @Test(expected = ConfigException.class)
+  @Test
   public void testParseListenersUnparseableUri() {
     List<String> listenersConfig = new ArrayList<>();
     listenersConfig.add("!");
-    Application.parseListeners(listenersConfig, -1, ApplicationServer.SUPPORTED_URI_SCHEMES, "http");
+    assertThrows(ConfigException.class,
+        () ->
+            Application.parseListeners(listenersConfig, -1, RestConfig.SUPPORTED_URI_SCHEMES,
+                "http"));
   }
 
-  @Test(expected = ConfigException.class)
+  @Test
   public void testParseListenersUnsupportedScheme() {
     List<String> listenersConfig = new ArrayList<>();
     listenersConfig.add("http://localhost:8080");
     listenersConfig.add("foo://localhost:8081");
-    List<URI> listeners = Application.parseListeners(listenersConfig, -1, ApplicationServer.SUPPORTED_URI_SCHEMES, "http");
+    assertThrows(ConfigException.class,
+        () ->
+            Application.parseListeners(listenersConfig, -1, RestConfig.SUPPORTED_URI_SCHEMES,
+                "http"));
   }
 
-  @Test(expected = ConfigException.class)
   public void testParseListenersNoSupportedListeners() {
     List<String> listenersConfig = new ArrayList<>();
     listenersConfig.add("foo://localhost:8080");
     listenersConfig.add("bar://localhost:8081");
-    Application.parseListeners(listenersConfig, -1, ApplicationServer.SUPPORTED_URI_SCHEMES, "http");
+    assertThrows(ConfigException.class,
+        () ->
+            Application.parseListeners(listenersConfig, -1, RestConfig.SUPPORTED_URI_SCHEMES,
+                "http"));
   }
 
-  @Test(expected = ConfigException.class)
+  @Test
   public void testParseListenersNoPort() {
     List<String> listenersConfig = new ArrayList<>();
     listenersConfig.add("http://localhost");
-    Application.parseListeners(listenersConfig, -1, ApplicationServer.SUPPORTED_URI_SCHEMES, "http");
+    assertThrows(ConfigException.class,
+        () ->
+            Application.parseListeners(listenersConfig, -1, RestConfig.SUPPORTED_URI_SCHEMES,
+                "http"));
   }
 
   @Test
@@ -266,7 +278,7 @@ public class ApplicationTest {
   }
 
 
-  @Test(expected = UnsupportedOperationException.class)
+  @Test
   public void testBearerNoAuthenticator() {
     final Map<String, Object> config = ImmutableMap.of(
         RestConfig.AUTHENTICATION_METHOD_CONFIG, RestConfig.AUTHENTICATION_METHOD_BEARER);
@@ -277,10 +289,12 @@ public class ApplicationTest {
         return new JAASLoginService("realm");
       }
     };
-    app.createBearerSecurityHandler();
+    assertThrows(UnsupportedOperationException.class,
+        () ->
+            app.createBearerSecurityHandler());
   }
 
-  @Test(expected = UnsupportedOperationException.class)
+  @Test
   public void testBearerNoLoginService() {
     final Map<String, Object> config = ImmutableMap.of(
         RestConfig.AUTHENTICATION_METHOD_CONFIG, RestConfig.AUTHENTICATION_METHOD_BEARER);
@@ -291,20 +305,24 @@ public class ApplicationTest {
         return new BasicAuthenticator();
       }
     };
-    app.createBearerSecurityHandler();
+    assertThrows(UnsupportedOperationException.class,
+        () ->
+            app.createBearerSecurityHandler());
   }
 
-  @Test(expected = UnsupportedOperationException.class)
+  @Test
   public void testBearerNoAuthenticatorNoLoginService() {
     final Map<String, Object> config = ImmutableMap.of(
         RestConfig.AUTHENTICATION_METHOD_CONFIG, RestConfig.AUTHENTICATION_METHOD_BEARER);
 
     Application<?> app = new TestApp(config);
-    app.createBearerSecurityHandler();
+    assertThrows(UnsupportedOperationException.class,
+        () ->
+            app.createBearerSecurityHandler());
   }
 
   @Test
-  public void shouldInitializeResourceExtensions()throws Exception {
+  public void shouldInitializeResourceExtensions() throws Exception {
     try (TestApp testApp = new TestApp(TestRegistryExtension.class)) {
       assertThat(makeGetRequest(testApp, "/custom/resource"), is(Code.OK));
     }
@@ -312,12 +330,13 @@ public class ApplicationTest {
 
   @Test
   public void shouldThrowIfResourceExtensionThrows() {
-    Exception e = assertThrows(Exception.class, () -> new TestApp(TestRegistryExtension.class, BadRegistryExtension.class));
+    Exception e = assertThrows(Exception.class,
+        () -> new TestApp(TestRegistryExtension.class, BadRegistryExtension.class));
     assertThat(e.getMessage(), containsString("Exception throw by resource extension. ext:"));
   }
 
   @Test
-  public void shouldCloseResourceExtensions() throws Exception{
+  public void shouldCloseResourceExtensions() throws Exception {
     new TestApp(TestRegistryExtension.class).stop();
     assertThat("close called", TestRegistryExtension.CLOSE_CALLED.get(), is(true));
   }
@@ -335,23 +354,24 @@ public class ApplicationTest {
     TestApp testApp = new TestApp();
 
     assertEquals(testApp.metricsContext().getLabel(RESOURCE_LABEL_TYPE),
-            RestConfig.METRICS_JMX_PREFIX_DEFAULT);
+        RestConfig.METRICS_JMX_PREFIX_DEFAULT);
     assertEquals(testApp.metricsContext().getLabel(NAMESPACE),
-            RestConfig.METRICS_JMX_PREFIX_DEFAULT);
+        RestConfig.METRICS_JMX_PREFIX_DEFAULT);
   }
 
   @Test
-  public void testMetricsContextResourceOverride() throws Exception  {
+  public void testMetricsContextResourceOverride() throws Exception {
     Map<String, Object> props = new HashMap<>();
     props.put("metrics.context.resource.type", "FooApp");
 
     TestApp testApp = new TestApp(props);
 
     assertEquals(testApp.metricsContext().getLabel(RESOURCE_LABEL_TYPE), "FooApp");
-    assertEquals(testApp.metricsContext().getLabel(NAMESPACE), RestConfig.METRICS_JMX_PREFIX_DEFAULT);
+    assertEquals(testApp.metricsContext().getLabel(NAMESPACE),
+        RestConfig.METRICS_JMX_PREFIX_DEFAULT);
 
     /* Only NameSpace should be propagated to JMX */
-    String jmx_domain =  RestConfig.METRICS_JMX_PREFIX_DEFAULT;
+    String jmx_domain = RestConfig.METRICS_JMX_PREFIX_DEFAULT;
     String mbean_name = String.format("%s:type=kafka-metrics-count", jmx_domain);
 
     MBeanServer server = ManagementFactory.getPlatformMBeanServer();
@@ -370,7 +390,7 @@ public class ApplicationTest {
   }
 
   @Test
-  public void testMetricsContextJMXBeanRegistration() throws Exception  {
+  public void testMetricsContextJMXBeanRegistration() throws Exception {
     Map<String, Object> props = new HashMap<>();
     props.put(RestConfig.METRICS_JMX_PREFIX_CONFIG, "FooApp");
 
@@ -381,9 +401,9 @@ public class ApplicationTest {
   }
 
   private void assertExpectedUri(URI uri, String scheme, String host, int port) {
-    assertEquals("Scheme should be " + scheme, scheme, uri.getScheme());
-    assertEquals("Host should be " + host, host, uri.getHost());
-    assertEquals("Port should be " + port, port, uri.getPort());
+    assertEquals(scheme, uri.getScheme(), "Scheme should be " + scheme);
+    assertEquals(host, uri.getHost(), "Host should be " + host);
+    assertEquals(port, uri.getPort(), "Port should be " + port);
   }
 
   @SuppressWarnings("SameParameterValue")
@@ -455,7 +475,8 @@ public class ApplicationTest {
           .map(Class::getName)
           .collect(Collectors.joining(","));
 
-      return createConfig(Collections.singletonMap(RestConfig.RESOURCE_EXTENSION_CLASSES_CONFIG, extensionList));
+      return createConfig(
+          Collections.singletonMap(RestConfig.RESOURCE_EXTENSION_CLASSES_CONFIG, extensionList));
     }
 
     private static TestRestConfig createConfig(final Map<String, Object> props) {
